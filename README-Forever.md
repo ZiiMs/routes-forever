@@ -1,7 +1,14 @@
 # Routes on WoW Forever
 
+Community compatibility port of **Routes**, originally created by **Grum** and
+**Xinhuan** and maintained upstream at
+<https://github.com/Nevcairiel/Routes>.
+
 This branch adds WoW Forever (`_forever_`, build 1.60.1.70862, Interface `16001`,
-`WOW_PROJECT_CAMELOT`) support without dropping Retail or Classic.
+`WOW_PROJECT_CAMELOT`) support without dropping Retail or Classic. The original
+addon, design, and code remain the work of the upstream authors and
+contributors; this repository only layers the Forever compatibility changes on
+top of that history.
 
 ## Install for development
 

@@ -14,6 +14,9 @@
 ## X-License: All Rights Reserved.
 ## X-Discord: https://discord.com/invite/ayPc89hCbj
 ## X-Github: https://github.com/Nevcairiel/Routes
+## X-Original-Author: Grum, Xinhuan
+## X-Original-Project: https://github.com/Nevcairiel/Routes
+## X-Forever-Port: https://github.com/ZiiMs/routes-forever
 
 ## DefaultState: enabled
 ## OptionalDeps: Ace3, HereBeDragons, Cartographer, Cartographer_Notes, GatherMate, GatherMate2, Gatherer, HandyNotes

@@ -50,5 +50,9 @@ if (Test-Path -LiteralPath $zipPath) {
 }
 Compress-Archive -Path $stageAddon -DestinationPath $zipPath -CompressionLevel Optimal
 
+# Do not leave a second copy of the addon inside the source tree: it confuses
+# TOC validators and future packaging runs.
+Remove-Item -LiteralPath $stageRoot -Recurse -Force
+
 Write-Host "Packaged $zipPath" -ForegroundColor Green
 Write-Host "Extract the Routes folder into Interface\AddOns, then /reload."
