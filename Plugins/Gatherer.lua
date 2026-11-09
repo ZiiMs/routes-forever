@@ -18,9 +18,7 @@ do
 
 	-- stop loading if the addon is not enabled, or
 	-- stop loading if there is a reason why it can't be loaded ("MISSING" or "DISABLED")
-	local enabled = C_AddOns.GetAddOnEnableState(SourceName, UnitName("player")) > 0
-	local name, title, notes, loadable, reason, security = C_AddOns.GetAddOnInfo(SourceName)
-	if not enabled or (reason ~= nil and reason ~= "" and reason ~= "DEMAND_LOADED") then
+	if not Routes:IsAddonUsable(SourceName) then
 		loaded = false
 		return
 	end
@@ -32,7 +30,9 @@ end
 local function Summarize(data, zone)
 	local amount_of = {}
 	local db_type_of = {}
-	local zoneID = Routes.LZName[zone]
+	local zoneID = Routes:ResolveZoneID(zone)
+	if not zoneID then return data end
+	if not (Gatherer.Storage and Gatherer.Storage.ZoneGatherNames) then return data end
 
 	-- This loop works only because of a bug in Gatherer.
 	-- Gatherer may be fixed in the future and break this loop.
@@ -42,8 +42,8 @@ local function Summarize(data, zone)
 	end
 	for node, count in pairs(amount_of) do
 		local db_type = db_type_of[node]
-		local translatednode = Gatherer.Util.GetNodeName(node)
-		data[ ("%s;%s;%s;%s"):format(SourceName, db_type, node, count) ] = ("%s - %s (%d)"):format(L[SourceName..db_type], translatednode, count)
+		local translatednode = Gatherer.Util and Gatherer.Util.GetNodeName and Gatherer.Util.GetNodeName(node) or tostring(node)
+		data[ ("%s;%s;%s;%s"):format(SourceName, db_type, node, count) ] = ("%s - %s (%d)"):format(L[SourceName..db_type] or db_type, translatednode, count)
 	end
 
 	return data
@@ -59,8 +59,11 @@ local translate_db_type = {
 	["ARCH"] = "Archaeology",
 }
 local function AppendNodes(node_list, zone, db_type, node_type)
-	local zoneID = Routes.LZName[zone]
+	local zoneID = Routes:ResolveZoneID(zone)
+	if not zoneID then return end
+	if not (Gatherer.Storage and Gatherer.Storage.ZoneGatherNodes and Gatherer.Storage.GetGatherInfo) then return end
 	node_type = tonumber(node_type)
+	if not node_type then return end
 
 	-- posX, posY, timesGathered, indoors, harvested, inspected, source = GetGatherInfo(C, Z, node_type, db_type, index)
 	for index, posX, posY, inspected, indoors in Gatherer.Storage.ZoneGatherNodes(zoneID, db_type) do
@@ -71,8 +74,8 @@ local function AppendNodes(node_list, zone, db_type, node_type)
 
 
 	-- return the node_type for auto-adding
-	local translatednode = Gatherer.Util.GetNodeName(node_type)
-	return translatednode, translatednode, translate_db_type[db_type]
+	local translatednode = Gatherer.Util and Gatherer.Util.GetNodeName and Gatherer.Util.GetNodeName(node_type) or tostring(node_type)
+	return translatednode, translatednode, translate_db_type[db_type] or db_type
 end
 source.AppendNodes = AppendNodes
 

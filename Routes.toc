@@ -1,4 +1,4 @@
-﻿## Interface: 120005, 120007, 11508, 50503, 20505
+﻿## Interface: 16001, 120100, 120005, 120007, 11509, 11508, 50504, 50503, 20506, 20505
 
 ## Title: Routes
 ## Author: Grum, Xinhuan
@@ -33,30 +33,30 @@
 
 # Library files
 #@no-lib-strip@
-Libs\LibStub\LibStub.lua
-Libs\CallbackHandler-1.0\CallbackHandler-1.0.xml
-Libs\AceAddon-3.0\AceAddon-3.0.xml
-Libs\AceEvent-3.0\AceEvent-3.0.xml
-Libs\AceHook-3.0\AceHook-3.0.xml
-Libs\AceDB-3.0\AceDB-3.0.xml
-Libs\AceLocale-3.0\AceLocale-3.0.xml
-Libs\AceGUI-3.0\AceGUI-3.0.xml
-Libs\AceConsole-3.0\AceConsole-3.0.xml
-Libs\AceConfig-3.0\AceConfig-3.0.xml
-Libs\HereBeDragons\HereBeDragons-2.0.lua
-Libs\HereBeDragons\HereBeDragons-Migrate.lua
+Libs/LibStub/LibStub.lua
+Libs/CallbackHandler-1.0/CallbackHandler-1.0.xml
+Libs/AceAddon-3.0/AceAddon-3.0.xml
+Libs/AceEvent-3.0/AceEvent-3.0.xml
+Libs/AceHook-3.0/AceHook-3.0.xml
+Libs/AceDB-3.0/AceDB-3.0.xml
+Libs/AceLocale-3.0/AceLocale-3.0.xml
+Libs/AceGUI-3.0/AceGUI-3.0.xml
+Libs/AceConsole-3.0/AceConsole-3.0.xml
+Libs/AceConfig-3.0/AceConfig-3.0.xml
+Libs/HereBeDragons/HereBeDragons-2.0.lua
+Libs/HereBeDragons/HereBeDragons-Migrate.lua
 #@end-no-lib-strip@
 
 # Locale files
-Locales\Locale-enUS.lua
-Locales\Locale-deDE.lua
-Locales\Locale-esES.lua
-Locales\Locale-frFR.lua
-Locales\Locale-koKR.lua
-Locales\Locale-ptBR.lua
-Locales\Locale-ruRU.lua
-Locales\Locale-zhCN.lua
-Locales\Locale-zhTW.lua
+Locales/Locale-enUS.lua
+Locales/Locale-deDE.lua
+Locales/Locale-esES.lua
+Locales/Locale-frFR.lua
+Locales/Locale-koKR.lua
+Locales/Locale-ptBR.lua
+Locales/Locale-ruRU.lua
+Locales/Locale-zhCN.lua
+Locales/Locale-zhTW.lua
 
 # Core Routes files
 Routes.lua
@@ -64,11 +64,17 @@ Routes.xml
 TSP.lua
 
 # Routes Module files
-Modules\AutoShow.lua
-Modules\TomTom.lua
+Modules/AutoShow.lua
+Modules/TomTom.lua
+# Dev-only diagnostics: /routes selftest (safe to remove from release builds)
+Modules/SelfTest.lua
 
 # Addons we can draw data from
-Plugins\GatherMate2.lua
-Plugins\Gatherer.lua
-Plugins\HandyNotes.lua
-Plugins\GatherLite.lua
+Plugins/GatherMate2.lua
+Plugins/Gatherer.lua
+Plugins/HandyNotes.lua
+Plugins/GatherLite.lua
+
+# Bindings.xml is loaded automatically by the client from the addon folder;
+# it is intentionally not listed here (listing it would parse it as UI XML).
+# Verify the three Routes actions appear on Forever with /routes selftest.

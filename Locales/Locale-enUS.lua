@@ -6,6 +6,8 @@ local L = LibStub("AceLocale-3.0"):NewLocale("Routes", "enUS", true)
 
 L["Routes"] = true
 L["routes"] = true -- slash command
+L["Routes self-test module is not loaded."] = true
+L["Routes self-test is disabled in this build."] = true
 
 -- Options Config
 L["Options"] = true

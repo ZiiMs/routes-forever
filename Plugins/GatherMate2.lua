@@ -19,9 +19,7 @@ do
 
 	-- stop loading if the addon is not enabled, or
 	-- stop loading if there is a reason why it can't be loaded ("MISSING" or "DISABLED")
-	local enabled = C_AddOns.GetAddOnEnableState(SourceName, UnitName("player")) > 0
-	local name, title, notes, loadable, reason, security = C_AddOns.GetAddOnInfo(SourceName)
-	if not enabled or (reason ~= nil and reason ~= "" and reason ~= "DEMAND_LOADED") then
+	if not Routes:IsAddonUsable(SourceName) then
 		loaded = false
 		return
 	end
@@ -33,11 +31,12 @@ end
 local amount_of = {}
 local function Summarize(data, zone)
 	LN = LibStub("AceLocale-3.0"):GetLocale("GatherMate2Nodes", true) -- Workaround LoD of GatherMate2 if AddonLoader is used.
+	local zoneID = Routes:ResolveZoneID(zone)
+	if not zoneID then return data end
 	for db_type, db_data in pairs(GatherMate2.gmdbs) do
 		-- reuse table
 		wipe(amount_of)
 		-- only look for data for this currentzone
-		local zoneID = Routes.LZName[zone]
 		if db_data[zoneID] then
 			-- count the unique values (structure is: location => itemID)
 			for _,node in pairs(db_data[zoneID]) do
@@ -48,7 +47,8 @@ local function Summarize(data, zone)
 			for node,count in pairs(amount_of) do
 				local translatednode = GatherMate2:GetNameForNode(db_type, node)
 				if translatednode then
-					data[ ("%s;%s;%s;%s"):format(SourceName, db_type, node, count) ] = ("%s - %s (%d)"):format(L[SourceName..db_type], translatednode, count)
+					local label = L[SourceName..db_type] or db_type
+					data[ ("%s;%s;%s;%s"):format(SourceName, db_type, node, count) ] = ("%s - %s (%d)"):format(label, translatednode, count)
 				end
 			end
 		end
@@ -71,24 +71,29 @@ local translate_db_type = {
 local function AppendNodes(node_list, zone, db_type, node_type)
 	if type(GatherMate2.gmdbs[db_type]) == "table" then
 		node_type = tonumber(node_type)
+		if not node_type then return end
 
 		-- Find all of the notes
-		local zoneID = Routes.LZName[zone]
+		local zoneID = Routes:ResolveZoneID(zone)
+		if not zoneID then return end
 		for loc, t in GatherMate2:GetNodesForZone(zoneID, db_type, true) do
 			-- And are of a selected type - store
 			if t == node_type then
 				-- Convert GM2 location to our format
 				local x, y, l = GatherMate2:DecodeLoc(loc) -- ignore level for now
-				local newLoc = Routes:getID(x, y)
-				tinsert( node_list, newLoc )
+				if x and y then
+					local newLoc = Routes:getID(x, y)
+					tinsert( node_list, newLoc )
+				end
 			end
 		end
 
 		-- return the node_type for auto-adding
 		local translatednode = GatherMate2:GetNameForNode(db_type, node_type)
+		if not LN then return end
 		for k, v in pairs(LN) do
 			if v == translatednode then -- get the english name
-				return k, v, translate_db_type[db_type]
+				return k, v, translate_db_type[db_type] or db_type
 			end
 		end
 	end
@@ -98,6 +103,7 @@ source.AppendNodes = AppendNodes
 local function InsertNode(event, zone, nodeType, coord, node_name)
 	-- Convert coords
 	local x, y, l = GatherMate2:DecodeLoc(coord) -- ignore level for now
+	if not x or not y then return end
 	local newCoord = Routes:getID(x, y)
 	-- Convert zone
 	local zoneLocalized = Routes.GetZoneName(zone)
@@ -108,6 +114,7 @@ end
 local function DeleteNode(event, zone, nodeType, coord, node_name)
 	-- Convert coords
 	local x, y, l = GatherMate2:DecodeLoc(coord) -- ignore level for now
+	if not x or not y then return end
 	local newCoord = Routes:getID(x, y)
 	-- Convert zone
 	local zoneLocalized = Routes.GetZoneName(zone)

@@ -22,14 +22,26 @@ local active_tracking = {}
 local profession_to_skill = {}
 local classic_spell_ids = {}
 
-if GetProfessions then
-	profession_to_skill[GetSpellName(170691) or GetSpellName(9134)] = "Herbalism"
-	profession_to_skill[GetSpellName(2575)] = "Mining"
-	profession_to_skill[GetSpellName(7620) or GetSpellName(131476)] = "Fishing"
-	profession_to_skill[GetSpellName(4036)] = "ExtractGas"
-	if GetSpellName(78670) then
-		profession_to_skill[GetSpellName(78670)] = "Archaeology"
+-- GetSpellName returns nil for spells that do not exist on this client (for
+-- example Extract Gas on Forever).  Never use that result as a table key
+-- without checking it first, or the addon dies while loading.
+local function AddProfession(name, ...)
+	for i = 1, select("#", ...) do
+		local spellID = select(i, ...)
+		local spellName = spellID and GetSpellName(spellID)
+		if spellName then
+			profession_to_skill[spellName] = name
+			return
+		end
 	end
+end
+
+if GetProfessions then
+	AddProfession("Herbalism", 170691, 9134)
+	AddProfession("Mining", 2575)
+	AddProfession("Fishing", 7620, 131476)
+	AddProfession("ExtractGas", 4036)
+	AddProfession("Archaeology", 78670)
 else
 	classic_spell_ids = {
 		Herbalism = { 2366, 2368, 3570, 11993, 28695 },
@@ -39,36 +51,48 @@ else
 	}
 end
 
-local tracking_spells = {}
-tracking_spells[(GetSpellName(2580))] = "Mining"
-tracking_spells[(GetSpellName(2383))] = "Herbalism"
-tracking_spells[(GetSpellName(2481))] = "Treasure"
+local tracking_spells = {}     -- localized spell name -> route type
+local tracking_spell_ids = {}  -- spell ID -> route type (preferred on modern clients)
 
-if GetSpellName(43308) then
-	tracking_spells[(GetSpellName(43308))] = "Fishing"
+local function AddTracking(name, spellID)
+	if not spellID then return end
+	local spellName = GetSpellName(spellID)
+	if spellName then
+		tracking_spells[spellName] = name
+	end
+	-- Keep the ID mapping even when the client cannot resolve a name; the
+	-- tracking info structure exposes spellID on Forever and modern clients.
+	tracking_spell_ids[spellID] = name
 end
 
-if GetSpellName(167898) then
-	tracking_spells[(GetSpellName(167898))] = "Logging"
-end
+AddTracking("Mining", 2580)
+AddTracking("Herbalism", 2383)
+AddTracking("Treasure", 2481)
+AddTracking("Fishing", 43308)
+AddTracking("Logging", 167898)
 
 function AutoShow:SKILL_LINES_CHANGED()
 	for k, v in pairs(have_prof) do
 		have_prof[k] = false
 	end
-	if GetProfessions then
+	if GetProfessions and GetProfessionInfo then
 		for index, key in pairs({GetProfessions()}) do
-			local name, icon, rank, maxrank, numspells, spelloffset, skillline = GetProfessionInfo(key)
-			if profession_to_skill[name] then
-				have_prof[profession_to_skill[name]] = true
+			if key then
+				local name = GetProfessionInfo(key)
+				if name and profession_to_skill[name] then
+					have_prof[profession_to_skill[name]] = true
+				end
 			end
 		end
 	else
-		for professionName, spellIds in pairs(classic_spell_ids) do
-			for k, spellId in pairs(spellIds) do
-				if IsPlayerSpell(spellId) then
-					have_prof[professionName] = true
-					break
+		local isPlayerSpell = rawget(_G, "IsPlayerSpell")
+		if isPlayerSpell then
+			for professionName, spellIds in pairs(classic_spell_ids) do
+				for k, spellId in pairs(spellIds) do
+					if isPlayerSpell(spellId) then
+						have_prof[professionName] = true
+						break
+					end
 				end
 			end
 		end
@@ -80,37 +104,44 @@ function AutoShow:MINIMAP_UPDATE_TRACKING()
 	if WOW_PROJECT_ID == WOW_PROJECT_CLASSIC then
 		return self:UNIT_AURA()
 	end
+	if not GetNumTrackingTypes or not GetTrackingInfo then
+		return
+	end
+	local active = {}
 	for i = 1, GetNumTrackingTypes() do
 		local info = GetTrackingInfo(i)
-		if info and type(info) == "table" and tracking_spells[info.name] then
-			if info.active then
-				active_tracking[tracking_spells[info.name]] = true
-			else
-				active_tracking[tracking_spells[info.name]] = false
+		if info and type(info) == "table" then
+			local db_type = tracking_spell_ids[info.spellID] or tracking_spells[info.name]
+			if db_type and info.active then
+				active[db_type] = true
 			end
 		end
 	end
+	active_tracking = active
 	self:ApplyVisibility()
 end
 
+local function SetTrackingState(db_type, state)
+	if db_type then
+		active_tracking[db_type] = state
+	end
+end
+
+local tracking_texture_types = {
+	[136025] = "Mining",
+	[133939] = "Herbalism",
+	[135725] = "Treasure",
+}
+
 function AutoShow:UNIT_AURA()
-	local miningName = GetSpellName(2580)
-	local herbalismName = GetSpellName(2383)
-	local treasureName = GetSpellName(2481)
-	local trackingTex = GetTrackingTexture()
+	local getTrackingTexture = rawget(_G, "GetTrackingTexture")
+	local trackingTex = getTrackingTexture and getTrackingTexture()
 	if trackingTex then
-		if trackingTex == 136025 then -- Mining
-			active_tracking[tracking_spells[miningName]] = true
-			active_tracking[tracking_spells[herbalismName]] = false
-			active_tracking[tracking_spells[treasureName]] = false
-		elseif trackingTex == 133939 then -- Herbalism
-			active_tracking[tracking_spells[miningName]] = false
-			active_tracking[tracking_spells[herbalismName]] = true
-			active_tracking[tracking_spells[treasureName]] = false
-		elseif trackingTex == 135725 then -- Treasure
-			active_tracking[tracking_spells[miningName]] = false
-			active_tracking[tracking_spells[herbalismName]] = false
-			active_tracking[tracking_spells[treasureName]] = true
+		local activeType = tracking_texture_types[trackingTex]
+		if activeType then
+			for _, dbType in pairs({ "Mining", "Herbalism", "Treasure" }) do
+				SetTrackingState(dbType, dbType == activeType)
+			end
 		end
 	else
 		active_tracking = {}
@@ -159,6 +190,9 @@ function AutoShow:SetupAutoShow()
 
 		self:RegisterEvent("MINIMAP_UPDATE_TRACKING")
 		self:MINIMAP_UPDATE_TRACKING()
+	else
+		self:UnregisterEvent("SKILL_LINES_CHANGED")
+		self:UnregisterEvent("MINIMAP_UPDATE_TRACKING")
 	end
 end
 

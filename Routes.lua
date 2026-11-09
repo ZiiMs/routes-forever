@@ -67,7 +67,11 @@ local G = {} -- was Graph-1.0, but we removed the dependency
 Routes.G = G
 Routes.Dragons = LibStub("HereBeDragons-2.0")
 
+-- Interface 16001 (Forever) is numerically below the retail 9.0 TOC number,
+-- but it is a modern mainline-derived client.  Treat Camelot as 9.0+ so the
+-- minimap uses GetViewRadius and IsIndoors instead of the pre-9.0 zoom hack.
 local WoW90 = select(4, GetBuildInfo()) >= 90000
+	or (WOW_PROJECT_CAMELOT and WOW_PROJECT_ID == WOW_PROJECT_CAMELOT)
 
 -- database defaults
 local db
@@ -163,6 +167,71 @@ local math_cos = math.cos
 local Minimap = Minimap
 local GetPlayerFacing = GetPlayerFacing
 
+-- Compatibility helpers.  These keep the addon loadable on both the current
+-- mainline/Classic clients and WoW Forever (WOW_PROJECT_CAMELOT), where some
+-- legacy globals are now namespaced and map/facing values may be secret.
+local C_CVar = C_CVar
+local issecretvalue = issecretvalue
+
+local function GetCVarValue(name)
+	if C_CVar and C_CVar.GetCVar then
+		return C_CVar.GetCVar(name)
+	end
+	local legacyGetCVar = rawget(_G, "GetCVar")
+	if legacyGetCVar then
+		return legacyGetCVar(name)
+	end
+end
+
+local function GetCVarBool(name)
+	if C_CVar and C_CVar.GetCVarBool then
+		return C_CVar.GetCVarBool(name)
+	end
+	local value = GetCVarValue(name)
+	return value == "1" or value == "true"
+end
+
+local function IsSecretValue(value)
+	if value == nil or not issecretvalue then
+		return false
+	end
+	local ok, secret = pcall(issecretvalue, value)
+	return ok and secret
+end
+Routes.IsSecretValue = IsSecretValue
+
+local function GetPlayerZonePositionSafe()
+	local ok, x, y, zoneID = pcall(Routes.Dragons.GetPlayerZonePosition, Routes.Dragons, true)
+	if not ok or not x or not y or not zoneID then
+		return nil
+	end
+	if IsSecretValue(x) or IsSecretValue(y) or IsSecretValue(zoneID) then
+		return nil
+	end
+	return x, y, zoneID
+end
+
+local function IsIndoorsNow()
+	local indoorsFn = rawget(_G, "IsIndoors")
+	if indoorsFn then
+		local ok, value = pcall(indoorsFn)
+		if ok and value ~= nil then
+			return not not value
+		end
+	end
+
+	-- Legacy fallback for clients without IsIndoors().  Custom minimap addons
+	-- may drive the zoom directly, so only use this when the API is missing.
+	local zoomCvar = tonumber(GetCVarValue("minimapZoom"))
+	local zoom = Minimap and Minimap.GetZoom and Minimap:GetZoom()
+	if not zoomCvar or not zoom then
+		-- No data to compare: assume outdoors so routes still draw rather
+		-- than silently hiding every minimap line.
+		return false
+	end
+	return zoomCvar ~= zoom
+end
+
 ------------------------------------------------------------------------------------------------------
 -- Data for Localized Zone Names
 
@@ -205,6 +274,45 @@ local function GetZoneNameSafe(uiMapID)
 end
 
 Routes.GetZoneName = GetZoneName
+
+-- Shared plugin guards.  Optional data-source addons are not guaranteed to be
+-- present, enabled, or loadable on every client; asking for their state should
+-- never be the reason Routes fails to load.
+function Routes:IsAddonEnabled(addonName)
+	local player = UnitName("player")
+	if C_AddOns and C_AddOns.GetAddOnEnableState then
+		local ok, state = pcall(C_AddOns.GetAddOnEnableState, addonName, player)
+		return ok and state ~= nil and state > 0
+	end
+	local legacyGetState = rawget(_G, "GetAddOnEnableState")
+	if legacyGetState then
+		local ok, state = pcall(legacyGetState, addonName, player)
+		return ok and state ~= nil and state > 0
+	end
+	return false
+end
+
+function Routes:GetAddonDisabledReason(addonName)
+	local getInfo = (C_AddOns and C_AddOns.GetAddOnInfo) or rawget(_G, "GetAddOnInfo")
+	if not getInfo then return nil end
+	local ok, _, _, _, _, reason = pcall(getInfo, addonName)
+	if ok then return reason end
+	return nil
+end
+
+function Routes:IsAddonUsable(addonName)
+	if not self:IsAddonEnabled(addonName) then return false end
+	local reason = self:GetAddonDisabledReason(addonName)
+	return reason == nil or reason == "" or reason == "DEMAND_LOADED"
+end
+
+-- Routes.LZName returns 0 for an unknown zone through its metatable; callers
+-- should treat that sentinel as "no zone" rather than as a real map ID.
+function Routes:ResolveZoneID(zone)
+	local zoneID = zone and self.LZName[zone]
+	if not zoneID or zoneID == 0 then return nil end
+	return zoneID
+end
 
 Routes.LZName = setmetatable({}, { __index = function() return 0 end})
 
@@ -323,6 +431,7 @@ local MinimapShapes = {
 
 local minimap_radius
 local minimap_rotate
+local minimap_shape = "ROUND"
 local indoors = "indoor"
 
 local MinimapSize = { -- radius of minimap
@@ -344,15 +453,123 @@ local MinimapSize = { -- radius of minimap
 	},
 }
 
+-- GetMinimapShape is not a Forever client global.  Custom minimap addons such
+-- as EllesmereUI define it, so honour their answer when it is present and fall
+-- back to a best-effort mask check and the hit-rect crop when it is not.
+local GetMinimapCropInsets
+local function GetMinimapShape()
+	local shapeFn = rawget(_G, "GetMinimapShape")
+	if shapeFn then
+		local ok, shape = pcall(shapeFn)
+		if ok and type(shape) == "string" and MinimapShapes[shape] then
+			return shape
+		end
+	end
+
+	-- GetMaskTexture is not part of the documented Minimap API, but some
+	-- minimap replacements expose it; use it only when it actually exists.
+	if Minimap and Minimap.GetMaskTexture then
+		local ok, mask = pcall(Minimap.GetMaskTexture, Minimap)
+		if ok and mask then
+			-- 130937 is the square/cropped mask used by EllesmereUI and the
+			-- stock square minimap; a texture path can also identify itself.
+			if mask == 130937 then
+				return "SQUARE"
+			end
+			local maskText = tostring(mask):lower()
+			if maskText:find("square", 1, true) or maskText:find("rect", 1, true) then
+				return "SQUARE"
+			end
+		end
+	end
+
+	-- A cropped minimap keeps square corners; this covers rectangular/4:3
+	-- modes even when the addon does not define GetMinimapShape.
+	local left, right, top, bottom = GetMinimapCropInsets()
+	if left > 0 or right > 0 or top > 0 or bottom > 0 then
+		return "SQUARE"
+	end
+
+	return "ROUND"
+end
+Routes.GetMinimapShape = GetMinimapShape
+
+-- Returns the pixels trimmed from the minimap's visible area.  EllesmereUI's
+-- rectangular/4:3 mode reports itself as SQUARE but crops the top and bottom
+-- of the square canvas through SetHitRectInsets; line drawing has to respect
+-- that crop or it paints over the UI outside the map.
+function GetMinimapCropInsets()
+	if not Minimap or not Minimap.GetHitRectInsets then
+		return 0, 0, 0, 0
+	end
+	local ok, left, right, top, bottom = pcall(Minimap.GetHitRectInsets, Minimap)
+	if not ok then
+		return 0, 0, 0, 0
+	end
+	left, right, top, bottom = left or 0, right or 0, top or 0, bottom or 0
+	if IsSecretValue(left) or IsSecretValue(right) or IsSecretValue(top) or IsSecretValue(bottom) then
+		return 0, 0, 0, 0
+	end
+	return left, right, top, bottom
+end
+Routes.GetMinimapCropInsets = GetMinimapCropInsets
+
 local function is_round( dx, dy )
-	local map_shape = GetMinimapShape and GetMinimapShape() or "ROUND"
+	local shape = MinimapShapes[minimap_shape] or MinimapShapes.ROUND
 
 	local q = 1
 	if dx > 0 then q = q + 2 end -- right side
 	-- XXX Tripple check this
 	if dy > 0 then q = q + 1 end -- bottom side
 
-	return MinimapShapes[map_shape][q]
+	return shape[q]
+end
+
+-- Liang-Barsky clip for the minimap crop rectangle.  Coordinates are in the
+-- minimap's local pixel space (origin at the bottom-left), matching DrawLine.
+local function ClipSegmentToRect(x1, y1, x2, y2, minX, minY, maxX, maxY)
+	local dx, dy = x2 - x1, y2 - y1
+	local t0, t1 = 0, 1
+	local r
+
+	if dx == 0 then
+		if x1 < minX or x1 > maxX then return nil end
+	elseif dx > 0 then
+		r = (minX - x1) / dx
+		if r > t1 then return nil end
+		if r > t0 then t0 = r end
+		r = (maxX - x1) / dx
+		if r < t0 then return nil end
+		if r < t1 then t1 = r end
+	else
+		r = (maxX - x1) / dx
+		if r > t1 then return nil end
+		if r > t0 then t0 = r end
+		r = (minX - x1) / dx
+		if r < t0 then return nil end
+		if r < t1 then t1 = r end
+	end
+
+	if dy == 0 then
+		if y1 < minY or y1 > maxY then return nil end
+	elseif dy > 0 then
+		r = (minY - y1) / dy
+		if r > t1 then return nil end
+		if r > t0 then t0 = r end
+		r = (maxY - y1) / dy
+		if r < t0 then return nil end
+		if r < t1 then t1 = r end
+	else
+		r = (maxY - y1) / dy
+		if r > t1 then return nil end
+		if r > t0 then t0 = r end
+		r = (minY - y1) / dy
+		if r < t0 then return nil end
+		if r < t1 then t1 = r end
+	end
+
+	if t0 > t1 then return nil end
+	return x1 + t0 * dx, y1 + t0 * dy, x1 + t1 * dx, y1 + t1 * dy
 end
 
 local function is_inside( sx, sy, cx, cy, radius )
@@ -367,8 +584,20 @@ local function is_inside( sx, sy, cx, cy, radius )
 end
 
 local function GetFacing()
-	if GetPlayerFacing then return GetPlayerFacing() end
-	return -MiniMapCompassRing:GetFacing()
+	if GetPlayerFacing then
+		local ok, facing = pcall(GetPlayerFacing)
+		if ok and facing ~= nil and not IsSecretValue(facing) then
+			return facing
+		end
+		return nil
+	end
+	if MiniMapCompassRing and MiniMapCompassRing.GetFacing then
+		local ok, facing = pcall(MiniMapCompassRing.GetFacing, MiniMapCompassRing)
+		if ok and facing ~= nil and not IsSecretValue(facing) then
+			return -facing
+		end
+	end
+	return nil
 end
 
 local last_X, last_Y, last_facing = math.huge, math.huge, math.huge
@@ -404,17 +633,16 @@ function Routes:DrawMinimapLines(forceUpdate)
 		return
 	end
 
-	local _x, _y, currentZoneID = self.Dragons:GetPlayerZonePosition(true)
+	local _x, _y, currentZoneID = GetPlayerZonePositionSafe()
 
-	-- invalid coordinates - clear map
-	if not _x or not _y then
+	-- invalid coordinates or a restricted (secret) map position - clear map
+	if not _x or not _y or not currentZoneID then
 		G:HideLines(Minimap)
 		return
 	end
 
 	-- if we are indoors, or the zone we are in is not defined in our tables ... no routes
-	-- double check zoom as onload doesnt get you the map zoom
-	indoors = GetCVar("minimapZoom")+0 == Minimap:GetZoom() and "outdoor" or "indoor"
+	indoors = IsIndoorsNow() and "indoor" or "outdoor"
 	if not db.defaults.draw_indoors and indoors == "indoor" then
 		G:HideLines(Minimap)
 		return
@@ -430,6 +658,7 @@ function Routes:DrawMinimapLines(forceUpdate)
 		facing = GetFacing()
 
 		if not facing then
+			G:HideLines(Minimap)
 			return
 		end
 	end
@@ -438,6 +667,12 @@ function Routes:DrawMinimapLines(forceUpdate)
 		-- no update!
 		return
 	end
+
+	-- Cache shape/crop once per redraw: is_round() is called several times
+	-- per line segment and must not query the client each time.
+	minimap_shape = GetMinimapShape()
+	local crop_left, crop_right, crop_top, crop_bottom = GetMinimapCropInsets()
+	local crop_visible = crop_left > 0 or crop_right > 0 or crop_top > 0 or crop_bottom > 0
 
 	G:HideLines(Minimap)
 
@@ -451,9 +686,18 @@ function Routes:DrawMinimapLines(forceUpdate)
 	end
 
 	if WoW90 then
-		minimap_radius = C_Minimap.GetViewRadius()
+		local getViewRadius = C_Minimap and rawget(C_Minimap, "GetViewRadius")
+		if getViewRadius then
+			local ok, viewRadius = pcall(getViewRadius)
+			if ok and not IsSecretValue(viewRadius) then
+				minimap_radius = viewRadius
+			end
+		end
+		if not minimap_radius or minimap_radius <= 0 then
+			minimap_radius = (MinimapSize[indoors] or MinimapSize.outdoor)[Minimap:GetZoom() or 0] or 100
+		end
 	else
-		minimap_radius = MinimapSize[indoors][Minimap:GetZoom()]
+		minimap_radius = (MinimapSize[indoors] or MinimapSize.outdoor)[Minimap:GetZoom()] or 100
 	end
 	local radius = minimap_radius
 	local radius2 = radius * radius
@@ -730,34 +974,62 @@ function Routes:DrawMinimapLines(forceUpdate)
 							draw_ex =			 (draw_ex - minX) * scale_x
 							draw_ey = minimap_h - (draw_ey - minY) * scale_y
 
-							if defaults.line_gaps then
-								-- shorten the line by 5 pixels (scaled) on endpoints inside the Minimap
-								local gapConst = 5 / minimapScale
-								local dx = draw_sx - draw_ex
-								local dy = draw_sy - draw_ey
-								local l = (dx*dx + dy*dy)^0.5
-								local x = gapConst * dx / l
-								local y = gapConst * dy / l
-								local shorten1, shorten2
-								if last_inside then shorten1 = true else shorten1 = false end
-								if cur_inside then shorten2 = true else shorten2 = false end
-								if shorten2 and route_data.metadata and defaults.line_gaps_skip_cluster and #route_data.metadata[i] > 1 then
-									shorten2 = false
+							-- Crop the segment to the visible minimap band.  The
+							-- rectangular/4:3 mode keeps square corners but hides
+							-- the top and bottom strips via hit-rect insets.
+							local clipped_start, clipped_end = false, false
+							if crop_visible then
+								local old_sx, old_sy = draw_sx, draw_sy
+								local old_ex, old_ey = draw_ex, draw_ey
+								local nx1, ny1, nx2, ny2 = ClipSegmentToRect(
+									old_sx, old_sy, old_ex, old_ey,
+									crop_left, crop_bottom,
+									minimap_w - crop_right, minimap_h - crop_top
+								)
+								if not nx1 then
+									draw_sx = nil
+								else
+									draw_sx, draw_sy, draw_ex, draw_ey = nx1, ny1, nx2, ny2
+									clipped_start = nx1 ~= old_sx or ny1 ~= old_sy
+									clipped_end = nx2 ~= old_ex or ny2 ~= old_ey
 								end
-								if shorten1 and route_data.metadata and defaults.line_gaps_skip_cluster and #route_data.metadata[(i-1 == 0) and #route_data.route or i-1] > 1 then
-									shorten1 = false
-								end
-								if shorten1 and shorten2 and l > (gapConst*2) then -- draw if line is 10 or more pixels (scaled)
-									G:DrawLine( Minimap, draw_sx-x, draw_sy-y, draw_ex+x, draw_ey+y, width, color, "ARTWORK")
-								elseif shorten1 and not shorten2 and l > gapConst then
-									G:DrawLine( Minimap, draw_sx-x, draw_sy-y, draw_ex, draw_ey, width, color, "ARTWORK")
-								elseif shorten2 and not shorten1 and l > gapConst then
-									G:DrawLine( Minimap, draw_sx, draw_sy, draw_ex+x, draw_ey+y, width, color, "ARTWORK")
-								elseif not shorten1 and not shorten2 then
+							end
+
+							if draw_sx and draw_sy and draw_ex and draw_ey then
+								if defaults.line_gaps then
+									-- shorten the line by 5 pixels (scaled) on endpoints inside the Minimap
+									local gapConst = 5 / minimapScale
+									local dx = draw_sx - draw_ex
+									local dy = draw_sy - draw_ey
+									local l = (dx*dx + dy*dy)^0.5
+									if l > 0 then
+										local x = gapConst * dx / l
+										local y = gapConst * dy / l
+										local shorten1, shorten2
+										if last_inside then shorten1 = true else shorten1 = false end
+										if cur_inside then shorten2 = true else shorten2 = false end
+										-- A clipped endpoint is the crop edge, not a node: do not gap it.
+										if shorten1 and clipped_start then shorten1 = false end
+										if shorten2 and clipped_end then shorten2 = false end
+										if shorten2 and route_data.metadata and defaults.line_gaps_skip_cluster and #route_data.metadata[i] > 1 then
+											shorten2 = false
+										end
+										if shorten1 and route_data.metadata and defaults.line_gaps_skip_cluster and #route_data.metadata[(i-1 == 0) and #route_data.route or i-1] > 1 then
+											shorten1 = false
+										end
+										if shorten1 and shorten2 and l > (gapConst*2) then -- draw if line is 10 or more pixels (scaled)
+											G:DrawLine( Minimap, draw_sx-x, draw_sy-y, draw_ex+x, draw_ey+y, width, color, "ARTWORK")
+										elseif shorten1 and not shorten2 and l > gapConst then
+											G:DrawLine( Minimap, draw_sx-x, draw_sy-y, draw_ex, draw_ey, width, color, "ARTWORK")
+										elseif shorten2 and not shorten1 and l > gapConst then
+											G:DrawLine( Minimap, draw_sx, draw_sy, draw_ex+x, draw_ey+y, width, color, "ARTWORK")
+										elseif not shorten1 and not shorten2 then
+											G:DrawLine( Minimap, draw_sx, draw_sy, draw_ex, draw_ey, width, color, "ARTWORK")
+										end
+									end
+								else
 									G:DrawLine( Minimap, draw_sx, draw_sy, draw_ex, draw_ey, width, color, "ARTWORK")
 								end
-							else
-								G:DrawLine( Minimap, draw_sx, draw_sy, draw_ex, draw_ey, width, color, "ARTWORK")
 							end
 						end
 					end
@@ -787,7 +1059,11 @@ end)
 -- for inserting into relevant routes
 -- Zone name must be localized, node_name can be english or localized
 function Routes:InsertNode(zone, coord, node_name)
-	for route_name, route_data in pairs( db.routes[ self.LZName[zone] ] ) do
+	local zoneID = self:ResolveZoneID(zone)
+	if not zoneID then return end
+	local routes = db.routes[zoneID]
+	if not routes then return end
+	for route_name, route_data in pairs( routes ) do
 		-- for every route check if the route is created with this node
 		if route_data.selection then
 			for k, v in pairs(route_data.selection) do
@@ -796,14 +1072,14 @@ function Routes:InsertNode(zone, coord, node_name)
 					local x, y = self:getXY(coord)
 					local flag = false
 					for tabooname, used in pairs(route_data.taboos) do
-						if used and self:IsNodeInTaboo(x, y, db.taboo[ self.LZName[zone] ][tabooname]) then
+						if used and self:IsNodeInTaboo(x, y, db.taboo[zoneID][tabooname]) then
 							flag = true
 						end
 					end
 					if flag then
 						tinsert(route_data.taboolist, coord)
 					else
-						route_data.length = self.TSP:InsertNode(route_data.route, route_data.metadata, self.LZName[zone], coord, route_data.cluster_dist or 65) -- 65 is the old default
+						route_data.length = self.TSP:InsertNode(route_data.route, route_data.metadata, zoneID, coord, route_data.cluster_dist or 65) -- 65 is the old default
 						throttleFrame:Show()
 					end
 					break
@@ -817,7 +1093,11 @@ end
 -- for deleting into relevant routes
 -- Zone name must be localized, node_name can be english or localized
 function Routes:DeleteNode(zone, coord, node_name)
-	for route_name, route_data in pairs( db.routes[ self.LZName[zone] ] ) do
+	local zoneID = self:ResolveZoneID(zone)
+	if not zoneID then return end
+	local routes = db.routes[zoneID]
+	if not routes then return end
+	for route_name, route_data in pairs( routes ) do
 		-- for every route check if the route is created with this node
 		if route_data.selection then
 			local flag = false
@@ -843,7 +1123,7 @@ function Routes:DeleteNode(zone, coord, node_name)
 										tremove(route_data.metadata, i)
 										tremove(route_data.route, i)
 									end
-									route_data.length = self.TSP:PathLength(route_data.route, self.LZName[zone])
+									route_data.length = self.TSP:PathLength(route_data.route, zoneID)
 									throttleFrame:Show()
 									flag = true
 									break
@@ -856,7 +1136,7 @@ function Routes:DeleteNode(zone, coord, node_name)
 						for i = 1, #route_data.route do
 							if coord == route_data.route[i] then
 								tremove(route_data.route, i)
-								route_data.length = self.TSP:PathLength(route_data.route, self.LZName[zone])
+								route_data.length = self.TSP:PathLength(route_data.route, zoneID)
 								throttleFrame:Show()
 								flag = true
 								break
@@ -981,10 +1261,20 @@ local taboo_zone_args_desc_table = {
 -- General event functions
 
 local function ChatCommand(input)
-	if not input or input:trim() == "" then
+	local command = input and input:match("^%s*(.-)%s*$") or ""
+	if command == "" then
 		LibStub("AceConfigDialog-3.0"):Open("Routes")
+	elseif command:lower() == "selftest" then
+		local selfTest = Routes.GetModule and Routes:GetModule("SelfTest", true)
+		if selfTest and selfTest.IsEnabled and selfTest:IsEnabled() then
+			selfTest:Run()
+		elseif selfTest then
+			Routes:Print(L["Routes self-test is disabled in this build."])
+		else
+			Routes:Print(L["Routes self-test module is not loaded."])
+		end
 	else
-		LibStub("AceConfigCmd-3.0").HandleCommand(Routes, "routes", "Routes", input)
+		LibStub("AceConfigCmd-3.0").HandleCommand(Routes, "routes", "Routes", command)
 	end
 end
 
@@ -1083,10 +1373,10 @@ end
 function Routes:MINIMAP_UPDATE_ZOOM()
 	if not WoW90 then
 		local zoom = Minimap:GetZoom()
-		if GetCVar("minimapZoom") == GetCVar("minimapInsideZoom") then
+		if GetCVarValue("minimapZoom") == GetCVarValue("minimapInsideZoom") then
 			Minimap:SetZoom(zoom < 2 and zoom + 1 or zoom - 1)
 		end
-		indoors = GetCVar("minimapZoom")+0 == Minimap:GetZoom() and "outdoor" or "indoor"
+		indoors = IsIndoorsNow() and "indoor" or "outdoor"
 		Minimap:SetZoom(zoom)
 	end
 	timerFrame.force = true
@@ -1218,9 +1508,19 @@ function RoutesTabooPinMixin:OnCanvasSizeChanged()
 end
 
 function Routes:DrawWorldmapLines()
-	self.DataProvider:RefreshAllData()
+	if self.DataProvider then
+		self.DataProvider:RefreshAllData()
+	end
 	if self.BattleFieldDataProvider then
 		self.BattleFieldDataProvider:RefreshAllData()
+	end
+end
+
+function Routes:EnsureWorldMapProvider()
+	if self.DataProvider and WorldMapFrame and WorldMapFrame.AddDataProvider
+		and not self.worldMapProviderAdded then
+		WorldMapFrame:AddDataProvider(self.DataProvider)
+		self.worldMapProviderAdded = true
 	end
 end
 
@@ -1229,7 +1529,7 @@ function Routes:OnEnable()
 	if not self.DataProvider then
 		self.DataProvider = CreateFromMixins(RoutesDataProviderMixin)
 	end
-	WorldMapFrame:AddDataProvider(self.DataProvider)
+	self:EnsureWorldMapProvider()
 
 	-- Battlefield Map
 	if BattlefieldMapFrame then
@@ -1240,12 +1540,20 @@ function Routes:OnEnable()
 	if not WoW90 then
 		self:SecureHook(Minimap, "SetZoom", SetZoomHook)
 	end
+	-- Minimap addons change shape/crop by calling these directly.  Force a
+	-- redraw so the round/square/crop cache cannot go stale.
+	if Minimap.SetMaskTexture then
+		self:SecureHook(Minimap, "SetMaskTexture", SetZoomHook)
+	end
+	if Minimap.SetHitRectInsets then
+		self:SecureHook(Minimap, "SetHitRectInsets", SetZoomHook)
+	end
 	if db.defaults.draw_minimap then
 		self:RegisterEvent("MINIMAP_UPDATE_ZOOM")
 		self:RegisterEvent("CVAR_UPDATE")
 		timerFrame:Show()
 		Routes.Dragons.RegisterCallback(Routes, "PlayerZoneChanged", function() Routes:DrawMinimapLines(true) end)
-		minimap_rotate = GetCVar("rotateMinimap") == "1"
+		minimap_rotate = GetCVarBool("rotateMinimap")
 		self:MINIMAP_UPDATE_ZOOM()
 	end
 	for addon, plugin_table in pairs(Routes.plugins) do
@@ -1263,10 +1571,14 @@ function Routes:OnDisable()
 		end
 	end
 	timerFrame:Hide()
-	WorldMapFrame:RemoveDataProvider(self.DataProvider)
-	if BattlefieldMapFrame then
+	if WorldMapFrame and WorldMapFrame.RemoveDataProvider and self.DataProvider and self.worldMapProviderAdded then
+		WorldMapFrame:RemoveDataProvider(self.DataProvider)
+	end
+	self.worldMapProviderAdded = nil
+	if BattlefieldMapFrame and self.BattleFieldDataProvider and self.battleFieldProviderAdded then
 		BattlefieldMapFrame:RemoveDataProvider(self.BattleFieldDataProvider)
 	end
+	self.battleFieldProviderAdded = nil
 end
 
 function Routes:ADDON_LOADED(event, addon)
@@ -1278,12 +1590,22 @@ function Routes:ADDON_LOADED(event, addon)
 		end
 	end
 
+	if addon == "Blizzard_WorldMap" then
+		self:EnsureWorldMapProvider()
+	end
+
 	if addon == "Blizzard_BattlefieldMap" then
+		if not BattlefieldMapFrame or not BattlefieldMapFrame.AddDataProvider then
+			return
+		end
 		if not self.BattleFieldDataProvider then
 			self.BattleFieldDataProvider = CreateFromMixins(RoutesDataProviderMixin)
 			self.BattleFieldDataProvider.battleField = true
 		end
-		BattlefieldMapFrame:AddDataProvider(self.BattleFieldDataProvider)
+		if not self.battleFieldProviderAdded then
+			BattlefieldMapFrame:AddDataProvider(self.BattleFieldDataProvider)
+			self.battleFieldProviderAdded = true
+		end
 	end
 end
 
@@ -1557,7 +1879,7 @@ options.args.options_group.args = {
 								Routes:RegisterEvent("CVAR_UPDATE")
 								timerFrame:Show()
 								Routes.Dragons.RegisterCallback(Routes, "PlayerZoneChanged", function() Routes:DrawMinimapLines(true) end)
-								minimap_rotate = GetCVar("rotateMinimap") == "1"
+								minimap_rotate = GetCVarBool("rotateMinimap")
 								Routes:MINIMAP_UPDATE_ZOOM()  -- This has a DrawMinimapLines(true) call in it, and sets an "indoors" variable
 							else
 								Routes:UnregisterEvent("MINIMAP_UPDATE_ZOOM")
@@ -3151,11 +3473,18 @@ do
 		end
 		taboo_edit_list[taboo_data] = copy_of_taboo_data
 
-		-- open the WorldMapFlame on the right zone
-		if WOW_PROJECT_ID == WOW_PROJECT_MAINLINE then
-			OpenWorldMap(zone)
+		-- open the WorldMapFrame on the right zone.  WoW Forever uses the
+		-- mainline map API even though its project ID is WOW_PROJECT_CAMELOT.
+		if WOW_PROJECT_ID == WOW_PROJECT_MAINLINE or WOW_PROJECT_ID == WOW_PROJECT_CAMELOT then
+			local openWorldMap = (C_Map and C_Map.OpenWorldMap) or rawget(_G, "OpenWorldMap")
+			if openWorldMap then
+				openWorldMap(zone)
+			end
 		else
-			ShowUIPanel(WorldMapFrame)
+			local showUIPanel = rawget(_G, "ShowUIPanel")
+			if showUIPanel then
+				showUIPanel(WorldMapFrame)
+			end
 			WorldMapFrame:SetMapID(zone)
 		end
 
@@ -3691,6 +4020,9 @@ function G:DrawLine(C, sx, sy, ex, ey, w, color, layer)
 	-- Calculate actual length of line
 	local l = ((dx * dx) + (dy * dy)) ^ 0.5;
 
+	-- Center point is also needed by the zero-length early return below
+	local cx,cy = (sx + ex) / 2, (sy + ey) / 2;
+
 	-- Quick escape if it's zero length
 	if l == 0 then
 		T:ClearAllPoints();
@@ -3699,8 +4031,6 @@ function G:DrawLine(C, sx, sy, ex, ey, w, color, layer)
 		T:SetPoint("TOPRIGHT",   C, relPoint, cx, cy);
 		return T;
 	end
-
-	local cx,cy = (sx + ex) / 2, (sy + ey) / 2;
 
 	-- Normalize direction if necessary
 	if (dx < 0) then

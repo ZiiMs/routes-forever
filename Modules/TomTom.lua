@@ -30,11 +30,14 @@ local waypoints_opts = {
 }
 
 local function GetDistance(mapID, x, y)
-	local xCoord, yCoord, instance = Routes.Dragons:GetWorldCoordinatesFromZone(x, y, mapID, 0)
-	if not xCoord then return 0 end
+	local ok, xCoord, yCoord, instance = pcall(Routes.Dragons.GetWorldCoordinatesFromZone, Routes.Dragons, x, y, mapID, 0)
+	if not ok or not xCoord or not yCoord then return nil end
+	if Routes.IsSecretValue(xCoord) or Routes.IsSecretValue(yCoord) or Routes.IsSecretValue(instance) then return nil end
 
-	local xCoordPlayer, yCoordPlayer, instancePlayer = Routes.Dragons:GetPlayerWorldPosition()
-	if instancePlayer ~= instance then return 0 end
+	local ok2, xCoordPlayer, yCoordPlayer, instancePlayer = pcall(Routes.Dragons.GetPlayerWorldPosition, Routes.Dragons)
+	if not ok2 or not xCoordPlayer or not yCoordPlayer then return nil end
+	if Routes.IsSecretValue(xCoordPlayer) or Routes.IsSecretValue(yCoordPlayer) or Routes.IsSecretValue(instancePlayer) then return nil end
+	if instancePlayer ~= instance then return nil end
 
 	return Routes.Dragons:GetWorldDistance(instance, xCoordPlayer, yCoordPlayer, xCoord, yCoord)
 end
@@ -52,13 +55,15 @@ function TT:FindClosestVisibleRoute()
 	local closest_route, closest_node
 	local min_distance = math.huge
 	local defaults = db.defaults
-	for route_name, route_data in pairs(db.routes[ zone ]) do  -- for each route in current zone
+	local zone_routes = zone and db.routes[zone]
+	if not zone_routes then return end
+	for route_name, route_data in pairs(zone_routes) do  -- for each route in current zone
 		if type(route_data) == "table" and type(route_data.route) == "table" and #route_data.route > 1 then  -- if it is valid
 			if (not route_data.hidden and (route_data.visible or not defaults.use_auto_showhide)) or defaults.show_hidden then  -- if it is visible
 				for i = 1, #route_data.route do  -- for each node
 					local x2, y2 = Routes:getXY(route_data.route[i])
 					local dist = GetDistance(zone, x2, y2)
-					if dist < min_distance and dist > db.defaults.waypoint_hit_distance then
+					if dist and dist < min_distance and dist > db.defaults.waypoint_hit_distance then
 						-- Only consider nodes further than the hit distance
 						min_distance = dist
 						closest_route = route_name
@@ -118,7 +123,7 @@ function TT.WaypointHit(event, uid, distance, dist, lastdist)
 					end
 					local x2, y2 = Routes:getXY(route[node_num])
 					local dist = GetDistance(zone, x2, y2)
-					if dist > db.defaults.waypoint_hit_distance then
+					if dist and dist > db.defaults.waypoint_hit_distance then
 						--Routes:Print("Adding node "..node_num)
 						stored_nodeID = route[node_num]
 						waypoints_opts.callbacks = callbacks

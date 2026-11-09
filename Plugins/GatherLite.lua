@@ -18,9 +18,7 @@ do
 
     -- stop loading if the addon is not enabled, or
     -- stop loading if there is a reason why it can't be loaded ("MISSING" or "DISABLED")
-    local enabled = C_AddOns.GetAddOnEnableState(SourceName, UnitName("player")) > 0
-    local name, title, notes, loadable, reason, security = C_AddOns.GetAddOnInfo(SourceName)
-    if not enabled or (reason ~= nil and reason ~= "" and reason ~= "DEMAND_LOADED") then
+    if not Routes:IsAddonUsable(SourceName) then
         loaded = false
         return
     end
@@ -32,7 +30,9 @@ local translate_db_type = {
     ["mining"] = "Mining",
 }
 local function Summarize(data, zone)
-    local zoneID = Routes.LZName[zone]
+    local zoneID = Routes:ResolveZoneID(zone)
+    if not zoneID or not GatherLite.GetNodes then return data end
+    for k in pairs(amount_of) do amount_of[k] = nil end
     local nodes = {};
     for index, node in ipairs(GatherLite:GetNodes()) do
         if zoneID == node.mapID then
@@ -45,21 +45,20 @@ local function Summarize(data, zone)
     end
 
     for index, node in ipairs(nodes) do
-        local object = GatherLite:GetNodeObject(node.object);
+        local object = GatherLite.GetNodeObject and GatherLite:GetNodeObject(node.object);
 
-        if not object then
-            break
+        if object then
+            local translatednode = GatherLite.translate and GatherLite:translate("node." .. object.name) or object.name;
+            local count = amount_of[node.object];
+            data[("%s;%s;%s;%s"):format(SourceName, node.type, object.name, count)] = ("%s - %s (%d)"):format(translate_db_type[node.type] or node.type, translatednode, count)
         end
-
-        local translatednode = GatherLite:translate("node." .. object.name);
-        local count = amount_of[node.object];
-        data[("%s;%s;%s;%s"):format(SourceName, node.type, object.name, count)] = ("%s - %s (%d)"):format(translate_db_type[node.type], translatednode, count)
     end
     return data
 end
 
 local function AppendNodes(node_list, zone, db_type, node_type)
-    local zoneID = Routes.LZName[zone]
+    local zoneID = Routes:ResolveZoneID(zone)
+    if not zoneID or not GatherLite.GetNodes then return end
 
     for index, node in ipairs(GatherLite:GetNodes()) do
         if zoneID == node.mapID and node.type == db_type then
@@ -68,8 +67,8 @@ local function AppendNodes(node_list, zone, db_type, node_type)
         end
     end
 
-    local translatednode = GatherLite:translate("node." .. node_type)
-    return translatednode, translatednode, translate_db_type[db_type]
+    local translatednode = GatherLite.translate and GatherLite:translate("node." .. node_type) or node_type
+    return translatednode, translatednode, translate_db_type[db_type] or db_type
 end
 
 local function InsertNode(event, node)
@@ -77,8 +76,9 @@ local function InsertNode(event, node)
     local zoneLocalized = Routes.GetZoneName(node.mapID)
     if not zoneLocalized then return end
 
-    local object = GatherLite:GetNodeObject(node.object);
-    local translatednode = GatherLite:translate("node." .. object.name)
+    local object = GatherLite.GetNodeObject and GatherLite:GetNodeObject(node.object);
+    if not object then return end
+    local translatednode = GatherLite.translate and GatherLite:translate("node." .. object.name) or object.name
 
     Routes:InsertNode(zoneLocalized, newCoord, translatednode)
 end

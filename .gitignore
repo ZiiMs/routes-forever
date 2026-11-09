@@ -396,3 +396,10 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# Vendored addon libraries (tools/vendor-libs.ps1)
+/Libs/
+
+# Local packaging output
+/dist/
+
